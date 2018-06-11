@@ -2,6 +2,8 @@ import logging
 import numpy as np
 
 from pandas import DataFrame, MultiIndex, Series, DatetimeIndex, Index
+
+from arctic.store._ndarray_store import MAX_DOCUMENT_SIZE, _CHUNK_SIZE
 from ..exceptions import ArcticException
 try:  # 0.21+ Compatibility
     from pandas._libs.tslib import Timestamp
@@ -132,7 +134,34 @@ class PandasSerializer(object):
         # and setting rtn.dtype to dtype does not preserve the metadata
         # see https://github.com/numpy/numpy/issues/6771
 
-        return (rtn, dtype)
+        return rtn, dtype
+
+    def _to_records_generator(self, df, chunk_size, string_max_len=None):
+        length_df = len(df)
+        if length_df < 2 or chunk_size < 2:  # assuming a minimum 1 byte per column's data
+            chunk, dtype = self._to_records(df, string_max_len=string_max_len)
+            chunk = chunk.tostring()
+            yield chunk, dtype, length_df, length_df, df
+        else:
+            item, _ = self._to_records(df[0:1], string_max_len=string_max_len)
+
+            sze = int(item.dtype.itemsize * np.prod(item.shape[1:]))
+            sze = sze if sze < chunk_size else chunk_size
+            rows_per_chunk = int(chunk_size / sze)
+
+            if rows_per_chunk < 1:
+                # If a row size is larger than chunk_size, use the maximum document size
+                logging.warning('Chunk size of {} is too small to fit a row ({}). '
+                                'Using maximum document size.'.format(chunk_size, MAX_DOCUMENT_SIZE))
+                rows_per_chunk = int(MAX_DOCUMENT_SIZE / sze)
+                if rows_per_chunk < 1:
+                    raise ArcticException("Serialization failed to split dataframe into max sized chunks.")
+
+            for i in xrange(int(np.ceil(float(len(df)) / rows_per_chunk))):
+                chunk, dtype = self._to_records(df[i * rows_per_chunk: (i + 1) * rows_per_chunk],
+                                                string_max_len=string_max_len)
+                chunk = chunk.tostring()  # let the gc collect the recarray as early as possible
+                yield chunk, dtype, rows_per_chunk, length_df, df
 
     def can_convert_to_records_without_objects(self, df, symbol):
         # We can't easily distinguish string columns from objects
@@ -221,3 +250,6 @@ class DataFrameSerializer(PandasSerializer):
 
     def serialize(self, item, string_max_len=None):
         return self._to_records(item, string_max_len)
+
+    def serialize_generator(self, item, chunk_size=_CHUNK_SIZE, string_max_len=None):
+        return self._to_records_generator(item, chunk_size, string_max_len)

@@ -10,7 +10,7 @@ from ..decorators import mongo_retry
 from ..exceptions import UnhandledDtypeException, DataIntegrityException
 from ._version_store_utils import checksum, version_base_or_id
 
-from .._compression import compress_array, decompress
+from .._compression import compress_array, compress, decompress
 from six.moves import xrange
 
 
@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 _CHUNK_SIZE = 2 * 1024 * 1024 - 2048  # ~2 MB (a bit less for usePowerOf2Sizes)
 _APPEND_SIZE = 1 * 1024 * 1024  # 1MB
 _APPEND_COUNT = 60  # 1 hour of 1 min data
+
+MAX_DOCUMENT_SIZE = int(pymongo.common.MAX_BSON_SIZE * 0.75)
 
 
 def _promote_struct_dtypes(dtype1, dtype2):
@@ -444,8 +446,13 @@ class NdarrayStore(object):
                                                   "Parent: %s \n segments: %s" %
                                                   (seen_chunks, version['segment_count'], parent_id, segments))
 
-    def checksum(self, item):
-        sha = hashlib.sha1()
+    # def checksum(self, item):
+    #     sha = hashlib.sha1()
+    #     sha.update(item.tostring())
+    #     return Binary(sha.digest())
+    
+    def checksum(self, item, curr_sha=None):
+        sha = hashlib.sha1() if curr_sha is None else curr_sha
         sha.update(item.tostring())
         return Binary(sha.digest())
 
@@ -461,22 +468,81 @@ class NdarrayStore(object):
         version['dtype_metadata'] = dict(dtype.metadata or {})
         version['type'] = self.TYPE
         version['up_to'] = len(item)
-        version['sha'] = self.checksum(item)
 
-        if previous_version:
-            if 'sha' in previous_version \
-                    and previous_version['dtype'] == version['dtype'] \
-                    and self.checksum(item[:previous_version['up_to']]) == previous_version['sha']:
-                # The first n rows are identical to the previous version, so just append.
-                # Do a 'dirty' append (i.e. concat & start from a new base version) for safety
-                self._do_append(collection, version, symbol, item[previous_version['up_to']:], previous_version, dirty_append=True)
-                return
-
+        import types
+        if isinstance(item, types.GeneratorType):
+            the_sha, total_items = self._do_write_generator(collection, version, symbol, item, previous_version)
+            version['up_to'] = total_items
+            version['sha'] = the_sha
+        else:
+            version['up_to'] = len(item)
+            version['sha'] = self.checksum(item)
+            if previous_version:
+                if 'sha' in previous_version \
+                        and previous_version['dtype'] == version['dtype'] \
+                        and self.checksum(item[:previous_version['up_to']]) == previous_version['sha']:
+                    # The first n rows are identical to the previous version, so just append.
+                    # Do a 'dirty' append (i.e. concat & start from a new base version) for safety
+                    self._do_append(collection, version, symbol, item[previous_version['up_to']:], previous_version, dirty_append=True)
+                    return
+            self._do_write(collection, version, symbol, item, previous_version)
         version['base_sha'] = version['sha']
-        self._do_write(collection, version, symbol, item, previous_version)
+
+    def _do_write_generator(self, collection, version, symbol, items, previous_version, segment_offset=0):
+        previous_shas = []
+        if previous_version:
+            previous_shas = set([Binary(x['sha']) for x in
+                                 collection.find({'symbol': symbol},
+                                                 projection={'sha': 1, '_id': 0},
+                                                 )
+                                 ])
+
+        if segment_offset > 0 and 'segment_index' in previous_version:
+            existing_index = previous_version['segment_index']
+        else:
+            existing_index = None
+
+        segment_index = []
+        i = -1
+        total_sha = None
+        bulk = []
+        orig_data = None
+        length = None
+
+        for chunk_str, dtype, rows_per_chunk, length, orig_data in items:
+            i += 1
+            compressed_chunk = compress(chunk_str)
+            segment = {'data': Binary(compressed_chunk), 'compressed': True}
+            segment['segment'] = min((i + 1) * rows_per_chunk - 1, length - 1) + segment_offset
+            segment_index.append(segment['segment'])
+            total_sha = self.checksum(symbol, curr_sha=total_sha)
+            segment_sha = checksum(symbol, segment)
+
+            if segment_sha not in previous_shas:
+                segment['sha'] = segment_sha
+                bulk.append(pymongo.UpdateOne({'symbol': symbol, 'sha': segment_sha, 'segment': segment['segment']},
+                                              {'$set': segment, '$addToSet': {'parent': version['_id']}},
+                                              upsert=True))
+            else:
+                bulk.append(pymongo.UpdateOne({'symbol': symbol, 'sha': segment_sha, 'segment': segment['segment']},
+                                              {'$addToSet': {'parent': version['_id']}}))
+
+        if i != -1:
+            collection.bulk_write(bulk, ordered=False)
+
+        segment_index = self._segment_index(orig_data, existing_index=existing_index, start=segment_offset,
+                                            new_segments=segment_index)
+        if segment_index:
+            version['segment_index'] = segment_index
+        version['segment_count'] = i + 1
+        version['append_size'] = 0
+        version['append_count'] = 0
+
+        self.check_written(collection, symbol, version)
+
+        return total_sha, length
 
     def _do_write(self, collection, version, symbol, item, previous_version, segment_offset=0):
-
         sze = int(item.dtype.itemsize * np.prod(item.shape[1:]))
 
         # chunk and store the data by (uncompressed) size

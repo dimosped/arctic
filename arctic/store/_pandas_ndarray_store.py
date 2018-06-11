@@ -21,7 +21,7 @@ INDEX_DTYPE = [('datetime', DTN64_DTYPE), ('index', 'i8')]
 
 class PandasStore(NdarrayStore):
 
-    def _segment_index(self, recarr, existing_index, start, new_segments):
+    def _segment_index(self, recarr_or_df, existing_index, start, new_segments):
         """
         Generate index of datetime64 -> item offset.
 
@@ -40,15 +40,16 @@ class PandasStore(NdarrayStore):
             Where index is the 0-based index of the datetime in the DataFrame
         """
         # find the index of the first datetime64 column
-        idx_col = self._datetime64_index(recarr)
+        idx_col = self._datetime64_index(recarr_or_df) if isinstance(recarr_or_df, (np.recarray, np.ndarray)) else recarr_or_df.index
         # if one exists let's create the index on it
         if idx_col is not None:
             new_segments = np.array(new_segments, dtype='i8')
-            last_rows = recarr[new_segments - start]
-            # create numpy index
-            index = np.core.records.fromarrays([last_rows[idx_col]]
-                                               + [new_segments, ],
-                                               dtype=INDEX_DTYPE)
+            if isinstance(recarr_or_df, (np.recarray, np.ndarray)):
+                last_rows = recarr_or_df[new_segments - start]
+                # create numpy index
+                index = np.core.records.fromarrays([last_rows[idx_col]] + [new_segments], dtype=INDEX_DTYPE)
+            else:
+                index = idx_col[[new_segments - start] + [new_segments]]._ndarray_values
             # append to existing index if exists
             if existing_index:
                 # existing_index_arr is read-only but it's never written to
@@ -64,8 +65,7 @@ class PandasStore(NdarrayStore):
     def _datetime64_index(self, recarr):
         """ Given a np.recarray find the first datetime64 column """
         # TODO: Handle multi-indexes
-        names = recarr.dtype.names
-        for name in names:
+        for name in recarr.dtype.names:
             if recarr[name].dtype == DTN64_DTYPE:
                 return name
         return None
@@ -176,6 +176,7 @@ class PandasDataFrameStore(PandasStore):
 
     def write(self, arctic_lib, version, symbol, item, previous_version):
         item, md = self.SERIALIZER.serialize(item)
+        # items_generator = self.SERIALIZER.serialize_generator(item)
         super(PandasDataFrameStore, self).write(arctic_lib, version, symbol, item, previous_version, dtype=md)
 
     def append(self, arctic_lib, version, symbol, item, previous_version, **kwargs):
