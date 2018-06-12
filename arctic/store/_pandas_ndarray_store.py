@@ -167,6 +167,9 @@ class PandasSeriesStore(PandasStore):
         return self.SERIALIZER.deserialize(item)
 
 
+
+USE_INCREMENTAL_SER = False
+
 class PandasDataFrameStore(PandasStore):
     TYPE = 'pandasdf'
     SERIALIZER = DataFrameSerializer()
@@ -179,9 +182,14 @@ class PandasDataFrameStore(PandasStore):
         return False
 
     def write(self, arctic_lib, version, symbol, item, previous_version):
-        # item, md = self.SERIALIZER.serialize(item)
-        lazy_serializer = LazyIncrementalSerializer(self.SERIALIZER, item)
-        item, md = lazy_serializer, lazy_serializer.dtype
+        global USE_INCREMENTAL_SER
+        if USE_INCREMENTAL_SER:
+            print("With incremental")
+            lazy_serializer = LazyIncrementalSerializer(self.SERIALIZER, item)
+            item, md = lazy_serializer, lazy_serializer.dtype
+        else:
+            print("Without incremental")
+            item, md = self.SERIALIZER.serialize(item)
         super(PandasDataFrameStore, self).write(arctic_lib, version, symbol, item, previous_version, dtype=md)
 
     def append(self, arctic_lib, version, symbol, item, previous_version, **kwargs):

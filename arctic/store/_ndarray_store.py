@@ -446,15 +446,15 @@ class NdarrayStore(object):
                                                   "Parent: %s \n segments: %s" %
                                                   (seen_chunks, version['segment_count'], parent_id, segments))
 
-    # def checksum(self, item):
-    #     sha = hashlib.sha1()
-    #     sha.update(item.tostring())
-    #     return Binary(sha.digest())
-    
-    def checksum(self, item, curr_sha=None, is_bytes=False):
-        sha = hashlib.sha1() if curr_sha is None else curr_sha
-        sha.update(item if is_bytes else item.tostring())
+    def checksum(self, item):
+        sha = hashlib.sha1()
+        sha.update(item.tostring())
         return Binary(sha.digest())
+
+    def incremental_checksum(self, item, curr_sha=None, is_bytes=False):
+        curr_sha = hashlib.sha1() if curr_sha is None else curr_sha
+        curr_sha.update(item if is_bytes else item.tostring())
+        return curr_sha
 
     def write(self, arctic_lib, version, symbol, item, previous_version, dtype=None):
         collection = arctic_lib.get_top_level_collection()
@@ -513,10 +513,11 @@ class NdarrayStore(object):
         for chunk_bytes, dtype in items_lazy_ser.generator_bytes:
             i += 1
             compressed_chunk = compress(chunk_bytes)
-            segment = {'data': Binary(compressed_chunk), 'compressed': True,
+            total_sha = self.incremental_checksum(compressed_chunk, curr_sha=total_sha, is_bytes=True)
+            segment = {'data': Binary(compressed_chunk),
+                       'compressed': True,
                        'segment': min((i + 1) * items_lazy_ser.rows_per_chunk - 1, length - 1) + segment_offset}
             segment_index.append(segment['segment'])
-            total_sha = self.checksum(symbol, curr_sha=total_sha, is_bytes=True)
             segment_sha = checksum(symbol, segment)
 
             if segment_sha not in previous_shas:
@@ -530,6 +531,11 @@ class NdarrayStore(object):
 
         if i != -1:
             collection.bulk_write(bulk, ordered=False)
+            total_sha = Binary(total_sha.digest())
+        else:
+            # Zero sized data
+            emptyser, _ = items_lazy_ser.serialize()
+            total_sha = self.checksum(emptyser)
 
         segment_index = self._segment_index(orig_data, existing_index=existing_index, start=segment_offset,
                                             new_segments=segment_index)
