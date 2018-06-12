@@ -5,7 +5,7 @@ from bson.binary import Binary
 from pandas import DataFrame, Series, Panel
 import numpy as np
 
-from arctic.serialization.numpy_records import SeriesSerializer, DataFrameSerializer
+from arctic.serialization.numpy_records import SeriesSerializer, DataFrameSerializer, LazyIncrementalSerializer
 from .._compression import compress, decompress
 from ..date._util import to_pandas_closed_closed
 from ..exceptions import ArcticException
@@ -43,13 +43,17 @@ class PandasStore(NdarrayStore):
         idx_col = self._datetime64_index(recarr_or_df) if isinstance(recarr_or_df, (np.recarray, np.ndarray)) else recarr_or_df.index
         # if one exists let's create the index on it
         if idx_col is not None:
+            # Create the indexed segments (tstamps + segment position)
             new_segments = np.array(new_segments, dtype='i8')
             if isinstance(recarr_or_df, (np.recarray, np.ndarray)):
                 last_rows = recarr_or_df[new_segments - start]
-                # create numpy index
-                index = np.core.records.fromarrays([last_rows[idx_col]] + [new_segments], dtype=INDEX_DTYPE)
+                indexed_segments = [last_rows[idx_col]] + [new_segments]
             else:
-                index = idx_col[[new_segments - start] + [new_segments]]._ndarray_values
+                indexed_segments = [idx_col[new_segments - start]._ndarray_values] + [new_segments]
+
+            # create numpy index
+            index = np.core.records.fromarrays(indexed_segments, dtype=INDEX_DTYPE)
+
             # append to existing index if exists
             if existing_index:
                 # existing_index_arr is read-only but it's never written to
@@ -175,8 +179,9 @@ class PandasDataFrameStore(PandasStore):
         return False
 
     def write(self, arctic_lib, version, symbol, item, previous_version):
-        item, md = self.SERIALIZER.serialize(item)
-        # items_generator = self.SERIALIZER.serialize_generator(item)
+        # item, md = self.SERIALIZER.serialize(item)
+        lazy_serializer = LazyIncrementalSerializer(self.SERIALIZER, item)
+        item, md = lazy_serializer, lazy_serializer.dtype
         super(PandasDataFrameStore, self).write(arctic_lib, version, symbol, item, previous_version, dtype=md)
 
     def append(self, arctic_lib, version, symbol, item, previous_version, **kwargs):

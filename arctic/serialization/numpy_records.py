@@ -135,33 +135,33 @@ class PandasSerializer(object):
         # see https://github.com/numpy/numpy/issues/6771
 
         return rtn, dtype
-
-    def _to_records_generator(self, df, chunk_size, string_max_len=None):
-        length_df = len(df)
-        if length_df < 2 or chunk_size < 2:  # assuming a minimum 1 byte per column's data
-            chunk, dtype = self._to_records(df, string_max_len=string_max_len)
-            chunk = chunk.tostring()
-            yield chunk, dtype, length_df, length_df, df
-        else:
-            item, _ = self._to_records(df[0:1], string_max_len=string_max_len)
-
-            sze = int(item.dtype.itemsize * np.prod(item.shape[1:]))
-            sze = sze if sze < chunk_size else chunk_size
-            rows_per_chunk = int(chunk_size / sze)
-
-            if rows_per_chunk < 1:
-                # If a row size is larger than chunk_size, use the maximum document size
-                logging.warning('Chunk size of {} is too small to fit a row ({}). '
-                                'Using maximum document size.'.format(chunk_size, MAX_DOCUMENT_SIZE))
-                rows_per_chunk = int(MAX_DOCUMENT_SIZE / sze)
-                if rows_per_chunk < 1:
-                    raise ArcticException("Serialization failed to split dataframe into max sized chunks.")
-
-            for i in xrange(int(np.ceil(float(len(df)) / rows_per_chunk))):
-                chunk, dtype = self._to_records(df[i * rows_per_chunk: (i + 1) * rows_per_chunk],
-                                                string_max_len=string_max_len)
-                chunk = chunk.tostring()  # let the gc collect the recarray as early as possible
-                yield chunk, dtype, rows_per_chunk, length_df, df
+    
+    # def _to_records_generator(self, df, chunk_size, string_max_len=None):
+    #     length_df = len(df)
+    #     if length_df < 2 or chunk_size < 2:  # assuming a minimum 1 byte per column's data
+    #         chunk, dtype = self._to_records(df, string_max_len=string_max_len)
+    #         chunk = chunk.tostring()
+    #         yield chunk, dtype, length_df, length_df, df
+    #     else:
+    #         item, _ = self._to_records(df[0:1], string_max_len=string_max_len)
+    # 
+    #         sze = int(item.dtype.itemsize * np.prod(item.shape[1:]))
+    #         sze = sze if sze < chunk_size else chunk_size
+    #         rows_per_chunk = int(chunk_size / sze)
+    # 
+    #         if rows_per_chunk < 1:
+    #             # If a row size is larger than chunk_size, use the maximum document size
+    #             logging.warning('Chunk size of {} is too small to fit a row ({}). '
+    #                             'Using maximum document size.'.format(chunk_size, MAX_DOCUMENT_SIZE))
+    #             rows_per_chunk = int(MAX_DOCUMENT_SIZE / sze)
+    #             if rows_per_chunk < 1:
+    #                 raise ArcticException("Serialization failed to split dataframe into max sized chunks.")
+    # 
+    #         for i in xrange(int(np.ceil(float(len(df)) / rows_per_chunk))):
+    #             chunk, dtype = self._to_records(df[i * rows_per_chunk: (i + 1) * rows_per_chunk],
+    #                                             string_max_len=string_max_len)
+    #             chunk = chunk.tostring()  # let the gc collect the recarray as early as possible
+    #             yield chunk, dtype, rows_per_chunk, length_df, df
 
     def can_convert_to_records_without_objects(self, df, symbol):
         # We can't easily distinguish string columns from objects
@@ -253,3 +253,97 @@ class DataFrameSerializer(PandasSerializer):
 
     def serialize_generator(self, item, chunk_size=_CHUNK_SIZE, string_max_len=None):
         return self._to_records_generator(item, chunk_size, string_max_len)
+
+
+class LazyIncrementalSerializer(object):
+    def __init__(self, serializer, original_df, chunk_size=_CHUNK_SIZE, string_max_len=None):
+        if chunk_size < 1:
+            raise ArcticException("LazyIncrementalSerializer can't be initialized "
+                                  "with a chunk_size < 1 ({})".format(chunk_size))
+        if not serializer:
+            raise ArcticException("LazyIncrementalSerializer can't be initialized "
+                                  "with a None serializer object")
+        self.original_df = original_df
+        self.chunk_size = chunk_size
+        self.string_max_len = string_max_len
+        self._serializer = serializer
+        # The state which needs to be lazily initialized
+        self._dtype = None
+        self._rows_per_chunk = 0
+        self._initialized = False
+        self._first_item = None
+
+    def _do_init_state(self, item, dtype, rows_per_chunk):
+        self._first_item = item
+        self._dtype = dtype
+        self._rows_per_chunk = rows_per_chunk
+        self._initialized = True
+
+    def _lazy_init(self):
+        if not self._initialized:
+            [item for item in self._generator(get_first=True)]
+
+    def __len__(self):
+        return len(self.original_df)
+
+    @property
+    def shape(self):
+        return self.original_df.shape
+
+    @property
+    def dtype(self):
+        self._lazy_init()
+        return self._dtype
+
+    @property
+    def rows_per_chunk(self):
+        self._lazy_init()
+        return self._rows_per_chunk
+
+    @property
+    def generator(self):
+        return self._generator()
+
+    @property
+    def generator_bytes(self):
+        return self._generator(get_bytes=True)
+
+    def _generator(self, get_first=False, get_bytes=False):
+        if self.original_df is None or self.__len__() < 2 or self.chunk_size < 2:
+            chunk, dtype = self._serializer.serialize(self.original_df, string_max_len=self.string_max_len)
+            if not self._initialized:
+                self._do_init_state(chunk, dtype, len(chunk))
+            chunk = chunk.tostring() if get_bytes else chunk
+            yield chunk, dtype
+        else:
+            # Serialize the first row to obtain info about row size in bytes
+            chunk, dtype = self._serializer.serialize(self.original_df[0:1], string_max_len=self.string_max_len)
+
+            # Compute the number of rows which can fit in a chunk
+            sze = int(chunk.dtype.itemsize * np.prod(chunk.shape[1:]))
+            sze = sze if sze < self.chunk_size else self.chunk_size
+            rows_per_chunk = int(self.chunk_size / sze)
+            if rows_per_chunk < 1:
+                # If a row size is larger than chunk_size, use the maximum document size
+                logging.warning('Chunk size of {} is too small to fit a row ({}). '
+                                'Using maximum document size.'.format(self.chunk_size, MAX_DOCUMENT_SIZE))
+                # For huge rows, fall-back to using a very large document size, less than max-allowed by MongoDB
+                rows_per_chunk = int(MAX_DOCUMENT_SIZE / sze)
+                if rows_per_chunk < 1:
+                    raise ArcticException("Serialization failed to split dataframe into max sized chunks.")
+
+            # Initialize object's state
+            if not self._initialized:
+                self._do_init_state(chunk, dtype, rows_per_chunk)
+
+            # Compute the total number of chunks
+            total_chunks = int(np.ceil(float(self.__len__()) / rows_per_chunk))
+
+            # Perform serialization for each chunk
+            for i in xrange(total_chunks):
+                chunk, dtype = self._serializer.serialize(
+                    self.original_df[i * rows_per_chunk: (i + 1) * rows_per_chunk], string_max_len=self.string_max_len)
+                chunk = chunk.tostring() if get_bytes else chunk  # let the gc collect the recarray as early as possible
+                yield chunk, dtype
+                if get_first:
+                    break

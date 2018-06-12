@@ -451,9 +451,9 @@ class NdarrayStore(object):
     #     sha.update(item.tostring())
     #     return Binary(sha.digest())
     
-    def checksum(self, item, curr_sha=None):
+    def checksum(self, item, curr_sha=None, is_bytes=False):
         sha = hashlib.sha1() if curr_sha is None else curr_sha
-        sha.update(item.tostring())
+        sha.update(item if is_bytes else item.tostring())
         return Binary(sha.digest())
 
     def write(self, arctic_lib, version, symbol, item, previous_version, dtype=None):
@@ -469,9 +469,10 @@ class NdarrayStore(object):
         version['type'] = self.TYPE
         version['up_to'] = len(item)
 
-        import types
-        if isinstance(item, types.GeneratorType):
-            the_sha, total_items = self._do_write_generator(collection, version, symbol, item, previous_version)
+        from arctic.serialization.numpy_records import LazyIncrementalSerializer
+        if isinstance(item, LazyIncrementalSerializer):
+            the_sha, total_items = self._do_write_generator(collection, version, symbol,
+                                                            item, previous_version)
             version['up_to'] = total_items
             version['sha'] = the_sha
         else:
@@ -488,7 +489,7 @@ class NdarrayStore(object):
             self._do_write(collection, version, symbol, item, previous_version)
         version['base_sha'] = version['sha']
 
-    def _do_write_generator(self, collection, version, symbol, items, previous_version, segment_offset=0):
+    def _do_write_generator(self, collection, version, symbol, items_lazy_ser, previous_version, segment_offset=0):
         previous_shas = []
         if previous_version:
             previous_shas = set([Binary(x['sha']) for x in
@@ -506,16 +507,16 @@ class NdarrayStore(object):
         i = -1
         total_sha = None
         bulk = []
-        orig_data = None
-        length = None
+        orig_data = items_lazy_ser.original_df
+        length = len(items_lazy_ser)
 
-        for chunk_str, dtype, rows_per_chunk, length, orig_data in items:
+        for chunk_bytes, dtype in items_lazy_ser.generator_bytes:
             i += 1
-            compressed_chunk = compress(chunk_str)
-            segment = {'data': Binary(compressed_chunk), 'compressed': True}
-            segment['segment'] = min((i + 1) * rows_per_chunk - 1, length - 1) + segment_offset
+            compressed_chunk = compress(chunk_bytes)
+            segment = {'data': Binary(compressed_chunk), 'compressed': True,
+                       'segment': min((i + 1) * items_lazy_ser.rows_per_chunk - 1, length - 1) + segment_offset}
             segment_index.append(segment['segment'])
-            total_sha = self.checksum(symbol, curr_sha=total_sha)
+            total_sha = self.checksum(symbol, curr_sha=total_sha, is_bytes=True)
             segment_sha = checksum(symbol, segment)
 
             if segment_sha not in previous_shas:
