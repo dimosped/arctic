@@ -75,6 +75,107 @@ def _query(allow_secondary, library_name):
 #     topology.description.topology_type == TOPOLOGY_TYPE.Single
 #    and server.description.server_type != SERVER_TYPE.Mongos)
 
+import numpy as np
+import pandas as pd
+import random
+def get_random_df(nrows, ncols):
+    ret_df = pd.DataFrame(np.random.randn(nrows, ncols),
+                          index=pd.date_range('20170101',
+                                              periods=nrows, freq='S'),
+                          columns=["".join([chr(random.randint(ord('A'), ord('Z'))) for _ in range(8)]) for _ in
+                                   range(ncols)])
+    ret_df.index.name = 'index'
+    ret_df.index = ret_df.index.tz_localize('UTC')
+    return ret_df
+
+import arctic.store._pandas_ndarray_store as pnds
+import arctic.store._ndarray_store as nds
+
+
+from arctic.async import MONGO_ASYNC
+from pprint import pprint
+
+def test_async(library, library_name):
+    mydf = get_random_df(10000, 20)
+    library.write('test_sym', mydf)
+
+    request = MONGO_ASYNC.submit_request(library._versions.find, {})
+    data = request.future.result(timeout=None)
+
+    pprint(data)
+
+    print("Total times: schedule_delay={} exec_runtime={} total_time={}".format(request.start_time-request.create_time,
+                                                                  request.end_time-request.start_time,
+                                                                  request.end_time - request.create_time))
+
+def test_async_bulk(library, library_name):
+    mydf = get_random_df(10000, 20)
+    for i in range(10):
+        library.write('test_sym_{}'.format(i), mydf)
+
+    # pprint(data)
+    request = None
+    for i in range(10):
+        sym = 'test_sym_{}'.format(i)
+        op = pymongo.UpdateOne({'symbol': sym},
+                               {'$set': {'compressed': True}},
+                               upsert=True)
+        request = MONGO_ASYNC.submit_bulk_write(library._collection,
+                                                op=op,
+                                                request=request,
+                                                ordered=False,
+                                                with_mongo_retry=False,
+                                                batch_size=2)
+
+    MONGO_ASYNC.join_bulk_write(request)
+
+    print("Total times: schedule_delay={} exec_runtime={} total_time={}".format(request.start_time-request.create_time,
+                                                                  request.end_time-request.start_time,
+                                                                  request.end_time - request.create_time))
+
+
+
+def test_bench(library, library_name):
+    with patch('pymongo.message.query', side_effect=_query(False, library_name)), \
+         patch('pymongo.server_description.ServerDescription.server_type', SERVER_TYPE.Mongos):
+        import time
+        repeats = 1
+        # for df_len in range(0, 51000000/8, 3125000/5):
+        for df_len in (5000000,):
+            # 4GB (25000000, 20) [30sec]
+            mydf = get_random_df(df_len, 20)
+            print("\n\nData frame size in memory: {} MB".format(mydf.memory_usage().sum() / 1024.0 ** 2))
+
+            pnds.USE_INCREMENTAL_SER = False
+            sum_time = 0
+            for i in range(repeats):
+                start = time.time()
+                library.write(symbol, mydf)
+                sum_time += time.time() - start
+                library.delete(symbol)
+            print("\n==="
+                  "New LZ4, "
+                  "non-incremental serialization, "
+                  "Without Async Mongo===\n"
+                  "Total Time: {}".format(sum_time/repeats))
+
+            for batch_sz in (0, 10, 100):
+                pnds.USE_INCREMENTAL_SER = True
+                nds.BATCH_SIZE = batch_sz
+                sum_time = 0
+                for i in range(repeats):
+                    start = time.time()
+                    library.write(symbol, mydf)
+                    sum_time += time.time() - start
+                    library.delete(symbol)
+                print("\n==="
+                      "New LZ4, "
+                      "Incremental serialization, "
+                      "{} Async Mongo (batch size={})===\n"
+                      "Total Time: {}===".format(
+                    'With' if batch_sz > 0 else 'Without', batch_sz, sum_time / repeats))
+
+
 
 def test_store_item_new_version(library, library_name):
     with patch('pymongo.message.query', side_effect=_query(False, library_name)), \

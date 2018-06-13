@@ -22,6 +22,8 @@ _APPEND_COUNT = 60  # 1 hour of 1 min data
 
 MAX_DOCUMENT_SIZE = int(pymongo.common.MAX_BSON_SIZE * 0.75)
 
+BATCH_SIZE = 10
+
 
 def _promote_struct_dtypes(dtype1, dtype2):
     if not set(dtype1.names).issuperset(set(dtype2.names)):
@@ -503,10 +505,12 @@ class NdarrayStore(object):
         else:
             existing_index = None
 
+        from arctic.async import MONGO_ASYNC
         segment_index = []
         i = -1
         total_sha = None
         bulk = []
+        request = None
         orig_data = items_lazy_ser.original_df
         length = len(items_lazy_ser)
 
@@ -522,15 +526,29 @@ class NdarrayStore(object):
 
             if segment_sha not in previous_shas:
                 segment['sha'] = segment_sha
-                bulk.append(pymongo.UpdateOne({'symbol': symbol, 'sha': segment_sha, 'segment': segment['segment']},
-                                              {'$set': segment, '$addToSet': {'parent': version['_id']}},
-                                              upsert=True))
+                op = pymongo.UpdateOne({'symbol': symbol, 'sha': segment_sha, 'segment': segment['segment']},
+                                       {'$set': segment, '$addToSet': {'parent': version['_id']}},
+                                       upsert=True)
+                bulk.append(op)
             else:
-                bulk.append(pymongo.UpdateOne({'symbol': symbol, 'sha': segment_sha, 'segment': segment['segment']},
-                                              {'$addToSet': {'parent': version['_id']}}))
+                op = pymongo.UpdateOne({'symbol': symbol, 'sha': segment_sha, 'segment': segment['segment']},
+                                       {'$addToSet': {'parent': version['_id']}})
+                bulk.append(op)
 
+            if BATCH_SIZE > 0:
+                request = MONGO_ASYNC.submit_bulk_write(collection=collection,
+                                                        op=op,
+                                                        request=request,
+                                                        ordered=False,
+                                                        with_mongo_retry=False,
+                                                        batch_size=BATCH_SIZE)
+
+        if BATCH_SIZE > 0:
+            MONGO_ASYNC.join_bulk_write(request)
+        
         if i != -1:
-            collection.bulk_write(bulk, ordered=False)
+            if BATCH_SIZE < 1:
+                collection.bulk_write(bulk, ordered=False)
             total_sha = Binary(total_sha.digest())
         else:
             # Zero sized data

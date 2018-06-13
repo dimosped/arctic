@@ -87,7 +87,8 @@ setup(
                       "python-dateutil",
                       "pytz",
                       "tzlocal",
-                      "lz4"
+                      "lz4",
+                      'futures; python_version == "2.7"'
                      ],
     tests_require=["mock",
                    "mockextras",
