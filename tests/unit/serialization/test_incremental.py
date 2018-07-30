@@ -28,6 +28,9 @@ def _test_data():
         with_some_objects_ts = medium_ts.copy(deep=True)
         with_some_objects_ts.iloc[0:NON_HOMOGENEOUS_DTYPE_PATCH_SIZE_ROWS, 0] = None
         with_some_objects_ts.iloc[0:NON_HOMOGENEOUS_DTYPE_PATCH_SIZE_ROWS, 1] = 'A string'
+        large_with_some_objects = create_test_data(size=10000, cols=64, index=True, multiindex=False, random_data=True, random_ids=True, use_hours=True)
+        large_with_some_objects.iloc[0:NON_HOMOGENEOUS_DTYPE_PATCH_SIZE_ROWS, 0] = None
+        large_with_some_objects.iloc[0:NON_HOMOGENEOUS_DTYPE_PATCH_SIZE_ROWS, 1] = 'A string'
 
         with_string_ts = medium_ts.copy(deep=True)
         with_string_ts['str_col'] = 'abc'
@@ -39,10 +42,32 @@ def _test_data():
         with_some_none_ts.iloc[-10:-10] = np.nan
         with_some_none_ts = with_some_none_ts.replace({np.nan: None})
 
+        # Multi-index data frames
         multiindex_ts = create_test_data(size=500, cols=10, index=True, multiindex=True, random_data=True,
                                          random_ids=True)
         empty_multiindex_ts = create_test_data(size=0, cols=10, index=True, multiindex=True, random_data=True,
                                                random_ids=True)
+        large_multi_index = create_test_data(
+            size=50000, cols=10, index=True, multiindex=True, random_data=True, random_ids=True, use_hours=True)
+
+        # Multi-column data frames
+        columns = pd.MultiIndex.from_product([["bar", "baz", "foo", "qux"], ["one", "two"]], names=["first", "second"])
+        empty_multi_column_ts = pd.DataFrame([], columns=columns)
+
+        columns = pd.MultiIndex.from_product([["bar", "baz", "foo", "qux"], ["one", "two"]], names=["first", "second"])
+        multi_column_no_multiindex = pd.DataFrame(np.random.randn(2, 8), index=[0, 1], columns=columns)
+
+        large_multi_column = pd.DataFrame(np.random.randn(100000, 8), index=range(100000), columns=columns)
+
+        columns = pd.MultiIndex.from_product([[1, 2, 'a'], ['c', 5]])
+        multi_column_int_levels = pd.DataFrame([[9, 2, 8, 1, 2, 3], [3, 4, 2, 9, 10, 11]], index=['x', 'y'], columns=columns)
+
+        # Multi-index and multi-column data frames
+        columns = pd.MultiIndex.from_product([["bar", "baz", "foo", "qux"], ["one", "two"]])
+        index = pd.MultiIndex.from_product([["x", "y", "z"], ["a", "b"]])
+        multi_column_and_multi_index = pd.DataFrame(np.random.randn(6, 8), index=index, columns=columns)
+
+
         _TEST_DATA = {
             'onerow': (onerow_ts, df_serializer.serialize(onerow_ts)),
             'small': (small_ts, df_serializer.serialize(small_ts)),
@@ -51,11 +76,18 @@ def _test_data():
             'empty': (empty_ts, df_serializer.serialize(empty_ts)),
             'empty_index': (empty_index, df_serializer.serialize(empty_index)),
             'with_some_objects': (with_some_objects_ts, df_serializer.serialize(with_some_objects_ts)),
+            'large_with_some_objects': (large_with_some_objects, df_serializer.serialize(large_with_some_objects)),
             'with_string': (with_string_ts, df_serializer.serialize(with_string_ts)),
             'with_unicode': (with_unicode_ts, df_serializer.serialize(with_unicode_ts)),
             'with_some_none': (with_some_none_ts, df_serializer.serialize(with_some_none_ts)),
             'multiindex': (multiindex_ts, df_serializer.serialize(multiindex_ts)),
-            'empty_multiindex': (empty_multiindex_ts, df_serializer.serialize(empty_multiindex_ts))
+            'empty_multiindex': (empty_multiindex_ts, df_serializer.serialize(empty_multiindex_ts)),
+            'large_multi_index': (large_multi_index, df_serializer.serialize(large_multi_index)),
+            'empty_multicolumn': (empty_multi_column_ts, df_serializer.serialize(empty_multi_column_ts)),
+            'multi_column_no_multiindex': (multi_column_no_multiindex, df_serializer.serialize(multi_column_no_multiindex)),
+            'large_multi_column': (large_multi_column, df_serializer.serialize(large_multi_column)),
+            'multi_column_int_levels': (multi_column_int_levels, df_serializer.serialize(multi_column_int_levels)),
+            'multi_column_and_multi_index': (multi_column_and_multi_index, df_serializer.serialize(multi_column_and_multi_index))
         }
     return _TEST_DATA
 
