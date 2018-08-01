@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 DTN64_DTYPE = 'datetime64[ns]'
 
 # TODO: Switch on by default this flag to enable the fast check once this gets thoroughly tested
-_FAST_CHECK_DF_SERIALIZABLE = 'ENABLE_FAST_CHECK_DF_SERIALIZABLE' in os.environ
+_FAST_CHECK_DF_SERIALIZABLE = bool(os.environ.get('ENABLE_FAST_CHECK_DF_SERIALIZABLE'))
 
 
 def set_fast_check_df_serializable(config):

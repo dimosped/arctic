@@ -67,6 +67,15 @@ def _test_data():
         index = pd.MultiIndex.from_product([["x", "y", "z"], ["a", "b"]])
         multi_column_and_multi_index = pd.DataFrame(np.random.randn(6, 8), index=index, columns=columns)
 
+        # Nested n-dimensional
+        def _new_np_nd_array(val):
+            return np.rec.array([(val, ['A', 'BC'])],
+                                dtype=[('index', '<M8[ns]'), ('values', 'S2', (2,))])
+        n_dimensional_df = pd.DataFrame(
+            {'a': [_new_np_nd_array(1356998400000000000), _new_np_nd_array(1356998400000000001)],
+             'b': [_new_np_nd_array(1356998400000000002), _new_np_nd_array(1356998400000000003)]
+             },
+            index=(0, 1))
 
         _TEST_DATA = {
             'onerow': (onerow_ts, df_serializer.serialize(onerow_ts)),
@@ -87,7 +96,8 @@ def _test_data():
             'multi_column_no_multiindex': (multi_column_no_multiindex, df_serializer.serialize(multi_column_no_multiindex)),
             'large_multi_column': (large_multi_column, df_serializer.serialize(large_multi_column)),
             'multi_column_int_levels': (multi_column_int_levels, df_serializer.serialize(multi_column_int_levels)),
-            'multi_column_and_multi_index': (multi_column_and_multi_index, df_serializer.serialize(multi_column_and_multi_index))
+            'multi_column_and_multi_index': (multi_column_and_multi_index, df_serializer.serialize(multi_column_and_multi_index)),
+            'n_dimensional_df': (n_dimensional_df, Exception)
         }
     return _TEST_DATA
 
@@ -113,33 +123,57 @@ def test_none_df():
 
 @pytest.mark.parametrize("input_df", _test_data().keys())
 def test_serialize_pandas_to_recarray(input_df):
+    df = _test_data()[input_df][0]
+    expectation = _test_data()[input_df][1]
 
-    incr_ser = IncrementalPandasToRecArraySerializer(df_serializer, _test_data()[input_df][0])
-    incr_ser_data, incr_ser_dtype = incr_ser.serialize()
-    matching = _test_data()[input_df][1][0].tostring() == incr_ser_data.tostring()
-    assert matching
-    assert _test_data()[input_df][1][1] == incr_ser_dtype
+    incr_ser = IncrementalPandasToRecArraySerializer(df_serializer, df)
+    if not isinstance(expectation, tuple) and issubclass(expectation, Exception):
+        with pytest.raises(expectation):
+            incr_ser.serialize()
+    else:
+        incr_ser_data, incr_ser_dtype = incr_ser.serialize()
+        matching = expectation[0].tostring() == incr_ser_data.tostring()
+        assert matching
+        assert expectation[1] == incr_ser_dtype
 
 
 @pytest.mark.parametrize("input_df", _test_data().keys())
 def test_serialize_incremental_pandas_to_recarray(input_df):
-    incr_ser = IncrementalPandasToRecArraySerializer(df_serializer, _test_data()[input_df][0])
-    chunk_bytes = [chunk_b for chunk_b, _ in incr_ser.generator_bytes]
+    df = _test_data()[input_df][0]
+    expectation = _test_data()[input_df][1]
 
-    matching = _test_data()[input_df][1][0].tostring() == b''.join(chunk_bytes)
-    assert matching
-    assert _test_data()[input_df][1][1] == incr_ser.dtype
+    incr_ser = IncrementalPandasToRecArraySerializer(df_serializer, df)
+
+    if not isinstance(expectation, tuple) and issubclass(expectation, Exception):
+        with pytest.raises(expectation):
+            incr_ser.serialize()
+    else:
+        chunk_bytes = [chunk_b for chunk_b, _ in incr_ser.generator_bytes]
+        matching = expectation[0].tostring() == b''.join(chunk_bytes)
+        assert matching
+        assert expectation[1] == incr_ser.dtype
 
 
 @pytest.mark.parametrize("input_df", _test_data().keys())
 def test_serialize_incremental_chunk_size_pandas_to_recarray(input_df):
+    df = _test_data()[input_df][0]
+    expectation = _test_data()[input_df][1]
+
+    if not isinstance(expectation, tuple) and issubclass(expectation, Exception):
+        for div in (1, 4, 8):
+            chunk_size = div * 8 * 1024 ** 2
+            with pytest.raises(expectation):
+                incr_ser = IncrementalPandasToRecArraySerializer(df_serializer, df, chunk_size=chunk_size)
+                incr_ser.serialize()
+        return
+
     for div in (1, 4, 8):
         chunk_size = div * 8 * 1024 ** 2
-        if input_df is not None and len(_test_data()[input_df][1]) > 0:
-            row_size = int(_test_data()[input_df][1][0].dtype.itemsize)
+        if input_df is not None and len(expectation) > 0:
+            row_size = int(expectation[0].dtype.itemsize)
             chunk_size = NON_HOMOGENEOUS_DTYPE_PATCH_SIZE_ROWS * row_size / div
-        incr_ser = IncrementalPandasToRecArraySerializer(df_serializer, _test_data()[input_df][0], chunk_size=chunk_size)
+        incr_ser = IncrementalPandasToRecArraySerializer(df_serializer, df, chunk_size=chunk_size)
         chunk_bytes = [chunk[0] for chunk in incr_ser.generator_bytes]
-        matching = _test_data()[input_df][1][0].tostring() == b''.join(chunk_bytes)
+        matching = expectation[0].tostring() == b''.join(chunk_bytes)
         assert matching
-        assert _test_data()[input_df][1][1] == incr_ser.dtype
+        assert expectation[1] == incr_ser.dtype
