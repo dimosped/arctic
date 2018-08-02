@@ -77,6 +77,22 @@ def _test_data():
              },
             index=(0, 1))
 
+        # Exhaust all dtypes
+        mixed_dtypes_df = pd.DataFrame({
+            'string': list('abc'),
+            'int64': list(range(1, 4)),
+            'uint8': np.arange(3, 6).astype('u1'),
+            'uint64': np.arange(3, 6).astype('u8'),
+            'float64': np.arange(4.0, 7.0),
+            'bool1': [True, False, True],
+            'dates': pd.date_range('now', periods=3).values,
+            'other_dates': pd.date_range('20130101', periods=3).values,
+            # 'category': pd.Series(list("ABC")).astype('category'),
+            'tz_aware_dates': pd.date_range('20130101', periods=3, tz='US/Eastern'),
+            'complex': np.array([1. + 4.j, 2. + 5.j, 3. + 6.j])
+        })
+        mixed_dtypes_df['timedeltas'] = mixed_dtypes_df.dates.diff()
+
         _TEST_DATA = {
             'onerow': (onerow_ts, df_serializer.serialize(onerow_ts)),
             'small': (small_ts, df_serializer.serialize(small_ts)),
@@ -97,7 +113,8 @@ def _test_data():
             'large_multi_column': (large_multi_column, df_serializer.serialize(large_multi_column)),
             'multi_column_int_levels': (multi_column_int_levels, df_serializer.serialize(multi_column_int_levels)),
             'multi_column_and_multi_index': (multi_column_and_multi_index, df_serializer.serialize(multi_column_and_multi_index)),
-            'n_dimensional_df': (n_dimensional_df, Exception)
+            'n_dimensional_df': (n_dimensional_df, Exception),
+            'mixed_dtypes_df': (mixed_dtypes_df, df_serializer.serialize(mixed_dtypes_df))
         }
     return _TEST_DATA
 
